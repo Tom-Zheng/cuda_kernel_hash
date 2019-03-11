@@ -1,4 +1,8 @@
+#ifndef KERNEL_HASH_CUH
+#define KERNEL_HASH_CUH
+
 #include <stdio.h>
+#include <stdint.h>
 
 /********************/
 /* CUDA ERROR CHECK */
@@ -13,10 +17,6 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
    }
 }
 
-typedef unsigned int uint32_t;
-
-const int INITIAL_SIZE = 256;
-
 template <typename T> 
 __device__ void swap ( T& a, T& b )
 {
@@ -24,7 +24,6 @@ __device__ void swap ( T& a, T& b )
   a = b;
   b = c;
 }
-
 
 template <typename Key, typename Value>
 class RH_hash_table  {
@@ -34,16 +33,20 @@ public:
     uint32_t* buffer_hash;
 
     int num_elems;
-    int capacity;
+	int capacity;
+	int load_limit;
     uint32_t mask;
 
     int mutex;
 
     __host__  RH_hash_table()  {
+		const int INITIAL_SIZE = 2048;
+
         num_elems = 0;
         capacity = INITIAL_SIZE;
         mask = capacity - 1;
-        mutex = 0;
+		mutex = 0;
+		load_limit = INITIAL_SIZE * 0.9;
         gpuErrchk(cudaMalloc((void**)&buffer_keys,  sizeof(Key) * capacity));
         gpuErrchk(cudaMalloc((void**)&buffer_values,  sizeof(Value) * capacity));
         gpuErrchk(cudaMalloc((void**)&buffer_hash,  sizeof(uint32_t) * capacity));
@@ -106,11 +109,11 @@ public:
 	}
 
     __device__ void insert(Key key, Value val) {
-        num_elems++;
-        if(num_elems > capacity * 0.9)  {
-            printf("Hash load rate greater than 0.9\n");
+		if(num_elems + 1 > load_limit)  {
+			printf("Hash load rate greater than 0.9\n");
             return;
         }
+		num_elems++;
         uint32_t hash = hash_key(key);
 		int pos = desired_pos(hash);
 		int dist = 0;
@@ -137,7 +140,6 @@ public:
                     buffer_hash[pos] = hash;
 					return;
 				}
-
 				swap(hash, buffer_hash[pos]);
 				swap(key, buffer_keys[pos]);
 				swap(val, buffer_values[pos]);
@@ -183,49 +185,4 @@ public:
     }
 };
 
-
-
-
-__global__ void cuda_hello(RH_hash_table<uint32_t, uint32_t> * d_hashtables, int *nBlocks){
-    if(threadIdx.x == 0)  {
-        d_hashtables[0].lock();
-        *nBlocks = *nBlocks + 1;
-        d_hashtables[0].unlock();
-    }
-}
-
-int main() {
-    int hash_table_num = 10;
-    RH_hash_table<uint32_t, uint32_t> h_hashtables[hash_table_num];
-    
-    RH_hash_table<uint32_t, uint32_t> * d_hashtables = NULL;  
-    gpuErrchk(cudaMalloc((void**)&d_hashtables, sizeof(RH_hash_table<uint32_t, uint32_t>) * hash_table_num));
-    gpuErrchk(cudaMemcpy(d_hashtables, h_hashtables, sizeof(RH_hash_table<uint32_t, uint32_t>) * hash_table_num, cudaMemcpyHostToDevice));
-
-    int* d_nBlocks = NULL;
-    gpuErrchk(cudaMalloc((void**)&d_nBlocks, sizeof(int)));
-    gpuErrchk(cudaMemset(d_nBlocks, 0, sizeof(int)));
-
-    // Stopwatch
-    cudaEvent_t start, stop;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
-    cudaEventRecord(start, 0);
-    // Actual work
-    cuda_hello<<<10000,1>>>(d_hashtables, d_nBlocks);
-
-    cudaEventRecord(stop, 0);
-    cudaEventSynchronize(stop);
-    float elapsedTime;
-    cudaEventElapsedTime(&elapsedTime, start, stop);
-    printf( "Time elapsed: %3.1f ms\n", elapsedTime);
-    
-    int nBlocks = 0; 
-    gpuErrchk(cudaMemcpy(&nBlocks, d_nBlocks, sizeof(int), cudaMemcpyDeviceToHost));
-    printf("nBlocks = %d\n", nBlocks);
-
-    gpuErrchk(cudaFree( d_hashtables ));
-    gpuErrchk(cudaFree( d_nBlocks ));
-
-    return 0;
-}
+#endif
